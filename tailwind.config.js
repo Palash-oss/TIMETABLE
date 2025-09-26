@@ -33,6 +33,7 @@ export default {
           900: '#80231c',
         },
         neutral: {
+          25: '#fcfcfc',
           50: '#fafafa',
           100: '#f5f5f5',
           200: '#e5e5e5',

@@ -104,7 +104,7 @@ export default function Dashboard() {
       variants={containerVariants}
       initial="hidden"
       animate="visible"
-      className="space-y-6"
+      className="space-y-6 w-full min-h-full"
     >
       {/* Welcome Section */}
       <motion.div variants={itemVariants} className="bg-white rounded-xl p-6 border border-neutral-100">

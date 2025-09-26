@@ -35,12 +35,8 @@ export const Students = () => (
   </div>
 )
 
-export const ViewTimetable = () => (
-  <div className="card p-6">
-    <h2 className="text-xl font-semibold text-primary-900">View Timetable</h2>
-    <p className="text-neutral-600 mt-2">View and export generated timetables</p>
-  </div>
-)
+// ViewTimetable is now imported from its own file
+export { default as ViewTimetable } from './ViewTimetable'
 
 export const Settings = () => (
   <div className="card p-6">
