@@ -968,6 +968,75 @@ async def generate_timetable(request: dict):
         # Calculate NEP compliance using the data
         nep_compliance = calculate_nep_compliance(subjects)
         
+        # Store the generated timetable in database
+        stored_timetable_id = None
+        try:
+            # Create a timetable record
+            timetable_data = {
+                "semester_id": 1,  # Default semester for now
+                "name": f"Generated Timetable - Program {program_id} - Semester {semester}",
+                "status": "generated",
+                "generated_at": "now()",
+                "generated_by": "AI_SYSTEM",
+                "metadata": {
+                    "program_id": program_id,
+                    "semester": semester,
+                    "academic_year": request.get('academic_year', '2024-25'),
+                    "generation_method": "NEP_2020_DATABASE_DRIVEN",
+                    "subjects_count": len(subjects),
+                    "total_credits": sum(s.get('credits', 0) for s in subjects),
+                    "nep_compliance": nep_compliance
+                }
+            }
+            
+            # Insert timetable record
+            timetable_response = supabase.table('timetables').insert(timetable_data).execute()
+            if timetable_response.data:
+                stored_timetable_id = timetable_response.data[0]['id']
+                
+                # Store individual timetable entries
+                timetable_entries = []
+                day_mapping = {'Monday': 0, 'Tuesday': 1, 'Wednesday': 2, 'Thursday': 3, 'Friday': 4}
+                
+                for day_name, day_schedule in timetable.items():
+                    day_of_week = day_mapping.get(day_name, 0)
+                    
+                    for entry in day_schedule:
+                        # Parse time format "09:00-10:00"
+                        time_parts = entry['time'].split('-')
+                        start_time = time_parts[0] if len(time_parts) > 0 else '09:00'
+                        end_time = time_parts[1] if len(time_parts) > 1 else '10:00'
+                        
+                        # Find matching subject, teacher, classroom IDs
+                        subject_id = next((s['id'] for s in subjects if s['name'] == entry['subject_name']), None)
+                        teacher_id = next((t['id'] for t in teachers if t['name'] == entry['teacher']), None)
+                        classroom_id = next((c['id'] for c in classrooms if c['name'] == entry['classroom']), None)
+                        
+                        # Find or create time slot
+                        time_slot_id = 1  # Default fallback
+                        
+                        timetable_entry = {
+                            "timetable_id": stored_timetable_id,
+                            "subject_id": subject_id,
+                            "teacher_id": teacher_id, 
+                            "classroom_id": classroom_id,
+                            "time_slot_id": time_slot_id,
+                            "day_of_week": day_of_week,
+                            "start_time": start_time,
+                            "end_time": end_time,
+                            "entry_type": "lab" if entry['is_lab'] else "lecture",
+                            "notes": f"NEP Category: {entry['nep_category']}, Credits: {entry['credits']}"
+                        }
+                        timetable_entries.append(timetable_entry)
+                
+                # Batch insert timetable entries
+                if timetable_entries:
+                    entries_response = supabase.table('timetable_entries').insert(timetable_entries).execute()
+                    
+        except Exception as storage_error:
+            print(f"Warning: Failed to store timetable in database: {storage_error}")
+            # Continue without failing the whole operation
+        
         return {
             "success": True,
             "message": "NEP 2020 compliant timetable generated successfully!",
@@ -982,7 +1051,9 @@ async def generate_timetable(request: dict):
                 "classrooms": len(classrooms),
                 "time_slots": len(time_slots)
             },
-            "using_fallback_data": not (subjects_response and subjects_response.data)
+            "using_fallback_data": not (subjects_response and subjects_response.data),
+            "stored_timetable_id": stored_timetable_id,
+            "database_storage": "success" if stored_timetable_id else "failed"
         }
         
     except Exception as e:
@@ -1002,18 +1073,18 @@ async def get_timetable_entries(
 ):
     try:
         query = supabase.table('timetable_entries').select(
-            "*, courses(*), faculty(*), rooms(*), time_slots(*)"
+            "*, subjects(*), teachers(*), classrooms(*), time_slots(*)"
         ).eq('semester', semester).eq('academic_year', academic_year)
         
         if program_id:
-            # Get courses for the program first
-            courses = supabase.table('courses').select("id").eq('program_id', str(program_id)).execute()
-            course_ids = [c['id'] for c in courses.data] if courses.data else []
-            if course_ids:
-                query = query.in_('course_id', course_ids)
+            # Get subjects for the program first
+            subjects = supabase.table('subjects').select("id").eq('program_id', str(program_id)).execute()
+            subject_ids = [s['id'] for s in subjects.data] if subjects.data else []
+            if subject_ids:
+                query = query.in_('subject_id', subject_ids)
         
         if faculty_id:
-            query = query.eq('faculty_id', str(faculty_id))
+            query = query.eq('teacher_id', str(faculty_id))
         
         response = query.execute()
         return response.data
@@ -1141,6 +1212,134 @@ async def get_field_activities(course_id: Optional[UUID] = None):
         return response.data
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# New Timetable Management Endpoints
+@app.get("/api/timetables")
+async def get_stored_timetables(
+    program_id: int = None,
+    semester: int = None,
+    academic_year: str = None,
+    limit: int = 10
+):
+    """Get stored timetables with optional filtering"""
+    try:
+        # Build the query
+        query = supabase.table('timetables').select('*')
+        
+        # Apply filters if provided
+        if program_id:
+            query = query.eq('metadata->>program_id', str(program_id))
+        if semester:
+            query = query.eq('metadata->>semester', str(semester))
+        if academic_year:
+            query = query.eq('metadata->>academic_year', academic_year)
+        
+        # Execute query with limit
+        response = query.order('generated_at', desc=True).limit(limit).execute()
+        
+        return {
+            "success": True,
+            "timetables": response.data if response.data else [],
+            "count": len(response.data) if response.data else 0
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Failed to fetch timetables: {str(e)}",
+            "timetables": [],
+            "count": 0
+        }
+
+@app.get("/api/timetable/{timetable_id}")
+async def get_timetable_by_id(timetable_id: int):
+    """Get a specific timetable with its entries"""
+    try:
+        # Get the timetable record
+        timetable_response = supabase.table('timetables').select('*').eq('id', timetable_id).execute()
+        
+        if not timetable_response.data:
+            return {
+                "success": False,
+                "error": "Timetable not found",
+                "timetable": None
+            }
+        
+        timetable_data = timetable_response.data[0]
+        
+        # Get timetable entries with related data
+        entries_response = supabase.table('timetable_entries').select("""
+            *,
+            subjects:subject_id (name, code, credits),
+            teachers:teacher_id (name, email),
+            classrooms:classroom_id (name, capacity, building),
+            time_slots:time_slot_id (start_time, end_time, label)
+        """).eq('timetable_id', timetable_id).execute()
+        
+        # Reconstruct the timetable format
+        reconstructed_timetable = {
+            'Monday': [], 'Tuesday': [], 'Wednesday': [], 'Thursday': [], 'Friday': []
+        }
+        
+        day_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
+        
+        if entries_response.data:
+            for entry in entries_response.data:
+                day_name = day_names[entry['day_of_week']] if entry['day_of_week'] < len(day_names) else 'Monday'
+                
+                # Build entry in the expected format
+                formatted_entry = {
+                    "time": f"{entry['start_time']}-{entry['end_time']}",
+                    "subject_name": entry['subjects']['name'] if entry['subjects'] else 'Unknown Subject',
+                    "subject_code": entry['subjects']['code'] if entry['subjects'] else 'UNK',
+                    "teacher": entry['teachers']['name'] if entry['teachers'] else 'TBA',
+                    "classroom": entry['classrooms']['name'] if entry['classrooms'] else 'TBA',
+                    "is_lab": entry['entry_type'] == 'lab',
+                    "credits": entry['subjects']['credits'] if entry['subjects'] else 0,
+                    "nep_category": "MAJOR"  # Default for now
+                }
+                
+                reconstructed_timetable[day_name].append(formatted_entry)
+        
+        # Sort each day by start time
+        for day in reconstructed_timetable:
+            reconstructed_timetable[day].sort(key=lambda x: x['time'].split('-')[0])
+        
+        return {
+            "success": True,
+            "timetable_info": timetable_data,
+            "timetable": reconstructed_timetable,
+            "entries_count": len(entries_response.data) if entries_response.data else 0
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Failed to fetch timetable: {str(e)}",
+            "timetable": None
+        }
+
+@app.delete("/api/timetable/{timetable_id}")
+async def delete_timetable(timetable_id: int):
+    """Delete a stored timetable and its entries"""
+    try:
+        # Delete timetable entries first (foreign key constraint)
+        entries_delete = supabase.table('timetable_entries').delete().eq('timetable_id', timetable_id).execute()
+        
+        # Delete the timetable record
+        timetable_delete = supabase.table('timetables').delete().eq('id', timetable_id).execute()
+        
+        return {
+            "success": True,
+            "message": f"Timetable {timetable_id} deleted successfully",
+            "entries_deleted": len(entries_delete.data) if entries_delete.data else 0
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Failed to delete timetable: {str(e)}"
+        }
 
 if __name__ == "__main__":
     import uvicorn
